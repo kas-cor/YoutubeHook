@@ -1,0 +1,24 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "greasemonkey": true
+  },
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": "latest"
+  },
+  "globals": {
+    "GM_setValue": "readonly",
+    "GM_getValue": "readonly",
+    "GM_registerMenuCommand": "readonly",
+    "GM_addStyle": "readonly",
+    "GM_deleteValue": "readonly",
+    "GM_listValues": "readonly",
+    "GM_notification": "readonly",
+    "GM_openInTab": "readonly",
+    "GM_setClipboard": "readonly",
+    "GM_xmlhttpRequest": "readonly",
+    "unsafeWindow": "readonly"
+  }
+}
