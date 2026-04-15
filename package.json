@@ -1,0 +1,22 @@
+{
+  "name": "youtube-hook",
+  "version": "0.1.0",
+  "description": "YouTube enhancement userscript",
+  "main": "youtube-hook.user.js",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "node scripts/build.js",
+    "lint": "eslint *.user.js"
+  },
+  "keywords": [
+    "userscript",
+    "tampermonkey",
+    "youtube",
+    "browser-extension"
+  ],
+  "author": "You",
+  "license": "MIT",
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  }
+}
