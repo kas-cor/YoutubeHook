@@ -13,6 +13,14 @@ UserScript для отслеживания просмотренных видео
 
 ## Установка
 
+### Быстрая установка (рекомендуется)
+
+1. Установите расширение [Tampermonkey](https://www.tampermonkey.net/)
+2. Перейдите по ссылке: **[Установить YoutubeHook](https://github.com/kas-cor/YoutubeHook/raw/refs/heads/main/youtube-hook.user.js)**
+3. Нажмите "Установить" в появившемся окне Tampermonkey
+
+### Ручная установка
+
 1. Установите расширение [Tampermonkey](https://www.tampermonkey.net/)
 2. Откройте файл `youtube-hook.user.js` в браузере
 3. Нажмите "Установить"
