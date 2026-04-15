@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      0.1.0
 // @description  YouTube webhook tracker - sends watched video IDs to webhook
-// @author       You
+// @author       kas-cor
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
