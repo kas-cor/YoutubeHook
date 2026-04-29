@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YoutubeHook
 // @namespace    http://tampermonkey.net/
-// @version      0.1.0
+// @version      0.2.0
 // @description  YouTube webhook tracker - sends watched video IDs to webhook
 // @author       kas-cor
 // @match        https://www.youtube.com/*
@@ -11,7 +11,6 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
-// @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @run-at       document-start
@@ -23,9 +22,12 @@
     // Configuration
     const CONFIG = {
         debug: true,
-        version: '0.1.0',
+        version: '0.2.0',
         storageKey: 'sent_video_ids',
-        webhookUrlKey: 'webhook_url'
+        webhookUrlKey: 'webhook_url',
+        videoIdLength: 11,
+        requestTimeout: 10000,
+        debounceDelay: 300
     };
 
     // Logger utility
@@ -35,33 +37,59 @@
         warn: (...args) => console.warn('[YoutubeHook]', ...args)
     };
 
-    // Settings management
+    // Settings management with in-memory cache
     const settings = {
+        _cache: null,
         getWebhookUrl: () => GM_getValue(CONFIG.webhookUrlKey, ''),
         setWebhookUrl: (url) => GM_setValue(CONFIG.webhookUrlKey, url),
-        getSentIds: () => {
-            const data = GM_getValue(CONFIG.storageKey, '[]');
-            try {
-                return JSON.parse(data);
-            } catch (e) {
-                return [];
+        _loadSentIds: () => {
+            if (!settings._cache) {
+                const data = GM_getValue(CONFIG.storageKey, '[]');
+                try {
+                    settings._cache = JSON.parse(data);
+                } catch (e) {
+                    settings._cache = [];
+                }
             }
+            return settings._cache;
         },
+        getSentIds: () => settings._loadSentIds(),
         addSentId: (id) => {
-            const ids = settings.getSentIds();
+            const ids = settings._loadSentIds();
             if (!ids.includes(id)) {
                 ids.push(id);
                 GM_setValue(CONFIG.storageKey, JSON.stringify(ids));
             }
         },
-        clearSentIds: () => GM_deleteValue(CONFIG.storageKey),
-        isIdSent: (id) => settings.getSentIds().includes(id)
+        clearSentIds: () => {
+            settings._cache = null;
+            GM_deleteValue(CONFIG.storageKey);
+        },
+        isIdSent: (id) => settings._loadSentIds().includes(id)
     };
 
-    // Extract video ID from URL
+    // Extract video title from page (falls back through multiple sources)
+    function getVideoTitle() {
+        const ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogTitle) return ogTitle.content;
+        const h1 = document.querySelector('h1');
+        if (h1) return h1.textContent.trim();
+        return document.title.replace(/ - YouTube$/, '').trim();
+    }
+
+    // Extract video ID from URL (supports /watch, /shorts, /embed, /live)
     function extractVideoId(url) {
-        const match = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-        return match ? match[1] : null;
+        const patterns = [
+            /[?&]v=([a-zA-Z0-9_-]{11})/,       // /watch?v=...
+            /\/shorts\/([a-zA-Z0-9_-]{11})/,     // /shorts/...
+            /\/embed\/([a-zA-Z0-9_-]{11})/,      // /embed/...
+            /\/live\/([a-zA-Z0-9_-]{11})/        // /live/...
+        ];
+        for (const pattern of patterns) {
+            const match = url.match(pattern);
+            if (match) return match[1];
+        }
+        return null;
     }
 
     // Send video ID to webhook via GET request
@@ -82,7 +110,7 @@
         const videoInfo = {
             videoId: videoId,
             id: videoId,
-            title: document.title.replace(' - YouTube', '').trim(),
+            title: getVideoTitle(),
             url: `https://www.youtube.com/watch?v=${videoId}`,
             timestamp: new Date().toISOString()
         };
@@ -94,15 +122,14 @@
             .replace(/{id}/g, encodeURIComponent(videoInfo.id))
             .replace(/{title}/g, encodeURIComponent(videoInfo.title))
             .replace(/{url}/g, encodeURIComponent(videoInfo.url))
-            .replace(/{timestamp}/g, encodeURIComponent(videoInfo.timestamp))
-            .replace(/%VIDEO_ID%/g, encodeURIComponent(videoInfo.videoId))
-            .replace(/\{\{videoId\}\}/g, encodeURIComponent(videoInfo.videoId));
+            .replace(/{timestamp}/g, encodeURIComponent(videoInfo.timestamp));
 
         logger.log(`Sending video ${videoId} to webhook: ${finalUrl}`);
 
         GM_xmlhttpRequest({
             method: 'GET',
             url: finalUrl,
+            timeout: CONFIG.requestTimeout,
             onload: function(response) {
                 const status = response.status;
                 if (status >= 200 && status < 300) {
@@ -117,6 +144,9 @@
             },
             onerror: function(error) {
                 logger.error(`Request error for video ${videoId}:`, error);
+            },
+            ontimeout: function() {
+                logger.error(`Request timed out for video ${videoId}`);
             }
         });
     }
@@ -130,10 +160,20 @@
         }
     }
 
+    // Validate webhook URL format
+    function isValidUrl(string) {
+        try {
+            const url = new URL(string);
+            return url.protocol === 'http:' || url.protocol === 'https:';
+        } catch (_) {
+            return false;
+        }
+    }
+
     // Main initialization
     function init() {
         logger.log('Initializing YoutubeHook v' + CONFIG.version);
-        
+
         // Register Tampermonkey menu commands
         GM_registerMenuCommand('📝 Set Webhook URL', () => {
             const currentUrl = settings.getWebhookUrl();
@@ -149,38 +189,47 @@
                 : `Enter webhook URL with placeholders:\n\nExample: ${defaultTemplate}\n\n${placeholders}`;
             const newUrl = prompt(message, currentUrl || defaultTemplate);
             if (newUrl !== null) {
-                settings.setWebhookUrl(newUrl.trim());
+                const trimmed = newUrl.trim();
+                if (!trimmed || !isValidUrl(trimmed)) {
+                    alert('Invalid URL. Please enter a valid HTTP or HTTPS URL.');
+                    return;
+                }
+                settings.setWebhookUrl(trimmed);
                 alert('Webhook URL saved');
             }
         });
-        
+
         GM_registerMenuCommand('🗑️ Clear Sent History', () => {
             if (confirm('Clear all sent video IDs?')) {
                 settings.clearSentIds();
                 alert('History cleared');
             }
         });
-        
+
         GM_registerMenuCommand('📊 Show Stats', () => {
             const count = settings.getSentIds().length;
             const webhook = settings.getWebhookUrl() || 'Not set';
             alert(`Webhook: ${webhook}\nSent videos: ${count}`);
         });
-        
-        // Monitor URL changes (YouTube is SPA)
+
+        // Monitor URL changes (YouTube is SPA) with debounce
         let lastUrl = location.href;
+        let urlChangeTimer;
         const urlObserver = new MutationObserver(() => {
             if (location.href !== lastUrl) {
-                lastUrl = location.href;
-                handleUrlChange();
+                clearTimeout(urlChangeTimer);
+                urlChangeTimer = setTimeout(() => {
+                    lastUrl = location.href;
+                    handleUrlChange();
+                }, CONFIG.debounceDelay);
             }
         });
-        
+
         urlObserver.observe(document, { subtree: true, childList: true });
-        
+
         // Initial check
         handleUrlChange();
-        
+
         logger.log('YoutubeHook initialized successfully');
     }
 

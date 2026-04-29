@@ -16,3 +16,6 @@ npm-debug.log*
 
 # Cache
 .cache/
+
+# AI assistant workspace
+.aionrs/
