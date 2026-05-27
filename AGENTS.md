@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A Tampermonkey userscript that tracks watched YouTube videos and sends metadata (ID, title, URL, timestamp) to a configurable webhook via GET request. Designed to integrate with AI agents for watch history tracking, content monitoring, and daily YouTube digests.
+A **Tampermonkey userscript + backend server** that tracks watched YouTube videos, stores them via webhook, and generates periodic digests.
 
 ---
 
@@ -11,138 +11,179 @@ A Tampermonkey userscript that tracks watched YouTube videos and sends metadata 
 ```
 Browser (YouTube)
     │
-    ├── MutationObserver detects URL change (300ms debounce)
-    ├── extractVideoId() — parses /watch, /shorts, /embed, /live
-    ├── getVideoTitle() — fallback chain
-    ├── isIdSent() — dedup check (GM storage)
-    └── sendToWebhook() — GET via GM_xmlhttpRequest
-        │
-        └── Webhook Receiver
-                │
-                └── AI Agent / Digest System
+    ├── YoutubeHook (Tampermonkey)
+    │   ├── MutationObserver detects URL change (300ms debounce)
+    │   ├── extractVideoId() — parses /watch, /shorts, /embed, /live
+    │   ├── getVideoTitle() — fallback chain
+    │   ├── isIdSent() — dedup check (GM storage)
+    │   └── sendToWebhook() — GET via GM_xmlhttpRequest
+    └──────┬──────┘
+           │ GET /hook?videoId=X&title=...
+           ▼
+┌──────────────────────────────────┐
+│  Backend (FastAPI + SQLite)      │
+│  ├── /hook       - webhook RX   │
+│  ├── /r/{id}     - redirect+log │
+│  ├── /videos     - data query   │
+│  ├── /feed       - clicks feed  │
+│  └── /health     - health check │
+└──────────┬───────────────────────┘
+           │
+           ├── Digest CLI (python -m app.digest)
+           │   ├── --hours 3 --raw    → JSON for agent
+           │   ├── --hours 3 --no-send → HTML chunks
+           │   ├── --hours 3 --send    → direct Telegram
+           │   └── --refresh           → YouTube API cache
+           │
+           ├── SQLite (clicks.db)
+           └── Telegram (Bot API)
 ```
 
-## Script Metadata
+## Components
 
-```javascript
-// @name         YoutubeHook
-// @version      0.2.0
-// @description  YouTube webhook tracker – sends watched video IDs to webhook
-// @author       kas-cor
-// @match        https://www.youtube.com/*
-// @match        https://youtube.com/*
-// @grant        GM_setValue
-// @grant        GM_getValue
-// @grant        GM_deleteValue
-// @grant        GM_registerMenuCommand
-// @grant        GM_xmlhttpRequest
-// @connect      *
-// @run-at       document-start
-```
+### 1. UserScript (browser-side)
 
-## Core Components
+**`youtube-hook.user.js`** — Tampermonkey script
 
-### Logger Utility
-- Wraps `console.log/info/warn/error/group/groupEnd`
-- Respects `CONFIG.debug` flag (default: `true`)
-- Adds `[YoutubeHook]` prefix to all messages
+| Feature | Detail |
+|---------|--------|
+| **URL detection** | MutationObserver on `document.body`, 300ms debounce |
+| **Video ID parsing** | `/watch`, `/shorts`, `/embed`, `/live` patterns |
+| **Title resolution** | Fallback chain: `og:title` → `h1` → `document.title` |
+| **Deduplication** | `GM_setValue` / `GM_getValue` — same ID never sent twice |
+| **Webhook delivery** | GET via `GM_xmlhttpRequest`, 10s timeout |
+| **SPA navigation** | Handles YouTube SPA transitions without page reload |
 
-### Settings Management (GM Storage)
+### 2. Backend (server-side)
 
-| Function | Storage Key | Description |
-|----------|-------------|-------------|
-| `getWebhookUrl()` | `webhook_url` | Returns stored webhook URL string |
-| `setWebhookUrl(url)` | `webhook_url` | Saves webhook URL |
-| `getSentIds()` | `sent_video_ids` | Loads JSON array of sent IDs |
-| `addSentId(id)` | `sent_video_ids` | Adds ID to array (no duplicates) |
-| `isIdSent(id)` | — | Memory-cached check |
-| `clearSentIds()` | `sent_video_ids` | Clears array |
+Located in `backend/`. Docker Compose deployment.
 
-### Video Information Extraction
+| Service | Technology |
+|---------|-----------|
+| **API Server** | Python FastAPI, port 8800 |
+| **Database** | SQLite (clicks.db, WAL mode) |
+| **Digest CLI** | Python CLI, `python -m app.digest` |
 
-**`extractVideoId(url)`** — supports 4 patterns:
-```javascript
-const patterns = [
-  /[?&]v=([a-zA-Z0-9_-]{11})/,    // /watch?v=...
-  /\/shorts\/([a-zA-Z0-9_-]{11})/, // /shorts/...
-  /\/embed\/([a-zA-Z0-9_-]{11})/,  // /embed/...
-  /\/live\/([a-zA-Z0-9_-]{11})/    // /live/...
-];
-```
+#### Endpoints
 
-**`getVideoTitle()`** — fallback chain:
-1. `<meta property="og:title">`
-2. `<h1>` element
-3. `document.title` (stripping " - YouTube")
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/hook?videoId=X&title=...` | Receive video tracking data |
+| GET | `/r/{video_id}?t=title&u=user` | Redirect + log click |
+| GET | `/health` | Health check |
+| GET | `/feed?limit=100` | Clicks JSON feed |
+| GET | `/videos?since=...&until=...` | Video data query |
 
-### Send to Webhook (`sendToWebhook(videoId)`)
+#### Digest CLI Exit Codes
 
-1. Checks webhook URL is configured
-2. Checks dedup (in-memory cache)
-3. Builds `videoInfo` object `{videoId, id, title, url, timestamp}`
-4. Replaces placeholders (`{videoId}`, `{id}`, `{title}`, `{url}`, `{timestamp}`) — values URL-encoded
-5. Sends GET via `GM_xmlhttpRequest` with 10s timeout
-6. HTTP 200-399 → saves to history; failure → logged, not saved
+| Code | Meaning | Agent Action |
+|------|---------|-------------|
+| `0` | Videos found | Process stdout (JSON or chunks) |
+| `10` | No new videos | Remain silent (`[SILENT]`) |
+| `2` | Config error | Alert user |
 
-### URL Change Handling (SPA)
+## Digest Modes for AI Agents
 
-- **MutationObserver** on `document.body` (subtree + childList)
-- **Debounced** 300ms to handle YouTube's SPA transitions
-- Triggers `handleUrlChange()` → `sendToWebhook()`
-- Initial check on page load
-
-## Tampermonkey Menu Commands
-
-| Command | Implementation |
-|---------|---------------|
-| **📝 Set Webhook URL** | `prompt()` with placeholder help; validates http/https |
-| **🗑️ Clear Sent History** | `confirm()` → `GM_deleteValue(CONFIG.storageKey)` |
-| **📊 Show Stats** | `alert()` with webhook URL + sent count |
-
-## Key Behaviors
-
-- **Debounce:** 300ms between URL changes (prevents duplicate sends)
-- **Validation:** Webhook URL must be valid http/https
-- **Error handling:** Errors logged, never block the page
-- **Persistence:** `GM_setValue`/`GM_getValue` (survives page refreshes)
-- **Dedup:** Same video ID never sent twice (in-memory + GM storage)
-- **Performance:** In-memory cache for sent IDs; storage read once per session
-
-## Integration with YouTube Digest
-
-### Expected Webhook Endpoint (Python FastAPI example)
-```python
-@app.get("/youtube-hook")
-async def track_video(videoId: str, title: str = "", ts: str = ""):
-    # Store in DB
-    return {"ok": True}
-```
-
-### Data Flow for Digest
-```
-YoutubeHook → webhook → SQLite DB (daily accumulation)
-                              ↓
-                    Daily cron → query DB → generate digest
-                              ↓
-                    Deliver to user (Telegram / email)
-```
-
-## Development
+### Raw JSON (agent formats the message)
 
 ```bash
-npm install    # Install dependencies (for linting)
-npm run lint   # Run ESLint
+python -m app.digest --hours 3 --raw
+```
+
+Returns JSON with full video data including `description` field for LLM summarization.
+
+### Chunks (agent relays)
+
+```bash
+python -m app.digest --hours 3 --no-send
+```
+
+Outputs `===CHUNKS_START===` / `===CHUNK N===` / `===CHUNKS_END===` delimiters. Agent forwards them to the chat.
+
+### Direct send (script handles everything)
+
+```bash
+python -m app.digest --hours 3 --send
+```
+
+Script formats and sends directly to Telegram. Agent just triggers and forgets.
+
+## Integration
+
+### YoutubeHook Webhook URL Format
+
+Configure in Tampermonkey menu:
+```
+http://your-backend:8800/hook?videoId={videoId}&title={title}&ts={timestamp}&channel={channel}
+```
+
+### Placeholders
+
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `{videoId}` / `{id}` | YouTube video ID | `Qah3kw1-La0` |
+| `{title}` | Video title (URL-encoded) | `How+to+Deploy` |
+| `{url}` | Full URL | `https%3A%2F%2F...` |
+| `{timestamp}` | ISO timestamp | `2026-05-26T22%3A...` |
+
+## Quick Start
+
+```bash
+# 1. Install Tampermonkey + userscript
+# 2. Start backend
+docker compose -f backend/docker-compose.yml up -d
+
+# 3. Configure webhook URL in Tampermonkey menu
+# 4. Initialize channel cache
+docker compose exec ythook-backend python -m app.digest --refresh
+
+# 5. Run digest manually
+python -m app.digest --hours 3 --raw
 ```
 
 ## File Structure
 
 ```
 YoutubeHook/
-├── youtube-hook.user.js    ← Main userscript
-├── package.json            ← npm dependencies
-├── .eslintrc.json          ← ESLint config
+├── youtube-hook.user.js    ← Main userscript (browser)
 ├── SKILL.md                ← AI agent integration guide
 ├── AGENTS.md               ← This file
-├── README.md               ← User-facing docs (EN)
-└── README_ru.md            ← User-facing docs (RU)
+├── README.md               ← User-facing (EN)
+├── README_ru.md            ← User-facing (RU)
+├── package.json            ← Linting deps
+├── .eslintrc.json          ← ESLint config
+├── .gitignore
+└── backend/
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── requirements.txt
+    ├── .env.example
+    ├── README.md
+    ├── AGENTS.md            ← Backend-specific agent guide
+    └── app/
+        ├── main.py         ← FastAPI server
+        ├── digest.py       ← Digest CLI
+        ├── config.py
+        ├── database.py
+        ├── __init__.py
+        └── __main__.py
 ```
+
+## Development
+
+```bash
+# UserScript linting
+npm install
+npm run lint
+
+# Backend (Python)
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+## See Also
+
+- [backend/AGENTS.md](backend/AGENTS.md) — detailed backend agent integration
+- [SKILL.md](SKILL.md) — full skill integration guide
