@@ -1,7 +1,7 @@
 ---
 name: youtube-hook
-description: "Tampermonkey userscript that tracks watched YouTube videos and sends video info to a configurable webhook — supports placeholders, dedup, SPA navigation"
-version: 0.2.0
+description: "Tampermonkey userscript + backend server — tracks watched YouTube videos, collects via webhook, generates periodic digests"
+version: 0.3.0
 author: kas-cor
 license: MIT
 tags:
@@ -11,15 +11,16 @@ tags:
   - userscript
   - tracking
   - video
-platforms: [web]
+  - digest
+  - backend
+  - fastapi
+platforms: [web, linux, macos, windows]
 setup_needed: true
-required_commands: []
-required_environment_variables: []
 ---
 
 # YoutubeHook — AI Agent Integration Guide
 
-> **Tampermonkey userscript** that automatically detects watched YouTube videos and sends their metadata (ID, title, URL, timestamp) to a configurable webhook via GET request.
+> **Browser userscript + backend server** that tracks watched YouTube videos, stores them via webhook, and generates periodic digests with click tracking.
 
 ---
 
@@ -27,106 +28,95 @@ required_environment_variables: []
 
 | Component | Stack | Purpose |
 |-----------|-------|---------|
-| **UserScript** | JavaScript (Tampermonkey/Greasemonkey) | Runs in browser, intercepts YouTube page navigation, sends webhook GET requests |
-| **Webhook Receiver** | Any HTTP server | Receives video tracking data (e.g., Hermes / OpenClaw / custom backend) |
+| **UserScript** | JavaScript (Tampermonkey) | Runs in browser, intercepts YouTube navigation, sends webhook GET requests |
+| **Backend API** | Python (FastAPI + SQLite) | Receives webhook data, tracks clicks, serves video feed |
+| **Digest CLI** | Python CLI | Generates YouTube digests via YouTube Data API v3, sends to Telegram |
+| **Click Tracker** | SQLite | Logs video views and redirect clicks for dedup filtering |
 
 ---
 
 ## 🏗 Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Browser                               │
-│  ┌────────────────────────────────────────────────┐     │
-│  │  YouTube (youtube.com)                         │     │
-│  │                                                │     │
-│  │  YoutubeHook (Tampermonkey)                    │     │
-│  │  ┌──────────────────────────────────────────┐  │     │
-│  │  │ MutationObserver detects URL change       │  │     │
-│  │  │   → extractVideoId(url)                  │  │     │
-│  │  │   → getVideoTitle()                      │  │     │
-│  │  │   → buildPayload()                       │  │     │
-│  │  │   → checkDedup()                         │  │     │
-│  │  │   → sendToWebhook()                      │  │     │
-│  │  └──────────────────────────────────────────┘  │     │
-│  └────────────────────────────────────────────────┘     │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-                    GET request (with placeholders)
-                           │
-                    ┌──────┴──────┐
-                    │  Webhook    │
-                    │  Receiver   │
-                    │ (AI Agent)  │
-                    └─────────────┘
-```
-
-### Data Flow
-
-```
-User opens YouTube video page
-       ↓
-MutationObserver fires (debounced 300ms)
-       ↓
-extractVideoId() → parses /watch, /shorts, /embed, /live
-       ↓
-isIdSent() check (dedup via GM storage)
-       ↓
-Placeholders replaced: {videoId}, {title}, {url}, {timestamp}
-       ↓
-GET request to webhook URL via GM_xmlhttpRequest
-       ↓
-HTTP 200-399 → ID saved to history
+┌──────────────────────────────────────────────────────────┐
+│                    Browser                                │
+│  ┌─────────────────────────────────────────────────┐     │
+│  │  YoutubeHook (Tampermonkey)                      │     │
+│  │   → extractVideoId() → buildPayload()            │     │
+│  │   → sendToWebhook()                              │     │
+│  └────────────────────┬────────────────────────────┘     │
+└───────────────────────┼──────────────────────────────────┘
+                        │ GET /hook?videoId=X&title=...
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  Backend (FastAPI)                                       │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  /hook          — receive video tracking data     │    │
+│  │  /r/{video_id}  — redirect + log click            │    │
+│  │  /videos        — query video data by time range   │    │
+│  │  /feed          — recent clicks JSON               │    │
+│  └────────────────────┬─────────────────────────────┘    │
+└───────────────────────┼──────────────────────────────────┘
+                        │
+                  ┌─────▼─────┐
+                  │  SQLite    │
+                  │ clicks.db  │
+                  └─────┬─────┘
+                        │
+                  ┌─────▼─────┐
+                  │  Digest    │
+                  │  CLI       │
+                  │ (cron)     │
+                  └─────┬─────┘
+                        │
+                        ▼
+                 Telegram / Agent
 ```
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install the Script
+### 1. Install the UserScript
 
 - **Install Tampermonkey** for your browser: [tampermonkey.net](https://www.tampermonkey.net/)
 - **Click to install YoutubeHook:** [Install](https://github.com/kas-cor/YoutubeHook/raw/refs/heads/main/youtube-hook.user.js)
 - Click "Install" in the Tampermonkey dialog
 
-### 2. Configure Webhook URL
+### 2. Start the Backend
+
+```bash
+cd backend
+cp .env.example .env
+# Edit .env with your Telegram token, chat ID, etc.
+docker compose up -d
+```
+
+### 3. Configure Webhook URL
 
 1. Open YouTube
 2. Click Tampermonkey icon → 📝 **Set Webhook URL**
-3. Enter your webhook URL using placeholders:
-
+3. Enter your backend's webhook URL:
 ```
-https://your-agent-server.com/youtube-hook?id={videoId}&title={title}&ts={timestamp}
+http://your-server:8800/hook?videoId={videoId}&title={title}&ts={timestamp}
 ```
 
-### 3. Test It
+### 4. Initialize Channel Cache
 
-Open any YouTube video page. The script automatically detects it and sends a GET request to your webhook.
+```bash
+docker compose exec ythook-backend python -m app.digest --refresh
+```
 
 ---
 
 ## 🤖 AI Agent Integration
 
-### When to Use YoutubeHook
-
-| Use Case | Example |
-|----------|---------|
-| **Track watched videos** | `curl "http://your-agent/youtube-hook?id=Qah3kw1-La0&title=My+Video&ts=2026-05-26T22:30:00Z"` |
-| **Build a watch history** | Log all `{videoId}` and `{title}` from incoming webhooks |
-| **Content monitoring** | Track what's being watched on specific channels |
-| **YouTube digest** | Collect daily video stats and generate summaries |
-
 ### Webhook URL Format
 
-The script sends a **GET request** to your configured URL with placeholders replaced:
+The userscript sends a **GET request** to your configured URL with placeholders replaced:
 
 ```
-https://your-server.com/hook?video={videoId}&title={title}&url={url}&ts={timestamp}
-```
-
-**Example request that arrives at your server:**
-```
-https://your-server.com/hook?video=Qah3kw1-La0&title=How+to+Deploy+Docker&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DQah3kw1-La0&ts=2026-05-26T22%3A30%3A00.000Z
+http://your-backend:8800/hook?video=Qah3kw1-La0&title=How+to+Deploy+Docker&ts=2026-05-26T22%3A30%3A00.000Z
 ```
 
 ### Placeholders
@@ -138,30 +128,41 @@ https://your-server.com/hook?video=Qah3kw1-La0&title=How+to+Deploy+Docker&url=ht
 | `{url}` | Full YouTube URL (URL-encoded) | `https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3D...` |
 | `{timestamp}` | ISO timestamp (URL-encoded) | `2026-05-26T22%3A30%3A00.000Z` |
 
-### Sample Webhook URLs
+### Querying Tracked Videos
 
 ```bash
-# Minimal
-https://api.example.com/track?id={videoId}
+# Get videos from the last 6 hours
+curl "http://back-end:8800/videos?since=2026-05-27T00:00:00Z&limit=100"
 
-# Full info
-https://myserver.com/hook?video={videoId}&title={title}
+# Get recent clicks (for dedup filtering)
+curl "http://back-end:8800/feed?limit=20"
 
-# Agent endpoint
-https://your-agent/youtube-watch?v={videoId}&title={title}&ts={timestamp}
+# Health check
+curl "http://back-end:8800/health"
 ```
 
-### How to Parse Incoming Requests (AI Agent)
+### Running the Digest
 
-Your webhook receiver gets a standard GET request. Example in Python (FastAPI):
+```bash
+# Refresh channel cache (daily)
+python -m app.digest --refresh
 
-```python
-@app.get("/youtube-hook")
-async def youtube_hook(videoId: str, title: str = "", ts: str = ""):
-    print(f"Watched: {title} ({videoId}) at {ts}")
-    # Store in DB, generate digest, etc.
-    return {"ok": True}
+# Get digest — raw JSON (agent processes and formats)
+python -m app.digest --hours 3 --raw
+
+# Get digest — formatted chunks (agent relays)
+python -m app.digest --hours 3 --no-send
+
+# Get digest — send directly to Telegram
+python -m app.digest --hours 3 --send
 ```
+
+**Exit codes for agent automation:**
+| Code | Meaning | Agent Action |
+|------|---------|-------------|
+| `0` | Videos found | Process stdout |
+| `10` | No new videos | Remain silent |
+| `2` | Config error | Alert user |
 
 ---
 
@@ -171,12 +172,12 @@ async def youtube_hook(videoId: str, title: str = "", ts: str = ""):
 
 ```javascript
 const CONFIG = {
-  debug: true,                // Console logging toggle
-  storageKey: 'sent_video_ids', // GM storage key
-  webhookUrlKey: 'webhook_url', // GM storage key
-  videoIdLength: 11,           // YouTube video ID length
-  requestTimeout: 10000,       // 10s timeout
-  debounceDelay: 300           // 300ms URL change debounce
+  debug: true,
+  storageKey: 'sent_video_ids',
+  webhookUrlKey: 'webhook_url',
+  videoIdLength: 11,
+  requestTimeout: 10000,       // 10s
+  debounceDelay: 300           // 300ms
 };
 ```
 
@@ -188,46 +189,16 @@ const CONFIG = {
 | 🗑️ **Clear Sent History** | Reset all tracked video IDs |
 | 📊 **Show Stats** | Show current webhook URL + sent count |
 
----
+### Backend Environment Variables
 
-## 🧠 Script Internals
-
-### Video ID Extraction
-
-Supports all YouTube URL formats:
-```javascript
-const patterns = [
-  /[?&]v=([a-zA-Z0-9_-]{11})/,    // /watch?v=...
-  /\/shorts\/([a-zA-Z0-9_-]{11})/, // /shorts/...
-  /\/embed\/([a-zA-Z0-9_-]{11})/,  // /embed/...
-  /\/live\/([a-zA-Z0-9_-]{11})/    // /live/...
-];
-```
-
-### Title Resolution (fallback chain)
-
-1. `<meta property="og:title">` content
-2. `<h1>` element text content
-3. `document.title` (stripping " - YouTube")
-
-### Deduplication
-
-- Uses `GM_setValue`/`GM_getValue` to persist sent video IDs
-- In-memory cache for fast lookups during session
-- Same ID never sent twice
-
-### SPA Navigation Detection
-
-- **MutationObserver** on `document` detects URL changes without page reload
-- **Debounce:** 300ms delay prevents duplicate sends during YouTube's SPA transitions
-- Also runs initial check on page load
-
-### Webhook Request
-
-- Method: **GET** via `GM_xmlhttpRequest`
-- Timeout: **10 seconds**
-- Success: HTTP status 200-399 → ID saved to history
-- Failure: logged, ID not saved
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YTHOOK_PORT` | `8800` | Server port |
+| `YTHOOK_DATA_DIR` | `/data` | Data volume mount |
+| `YTHOOK_REDIRECT_BASE` | `http://localhost:8800/r` | Redirect base URL for digest links |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `TELEGRAM_CHAT_ID` | — | Telegram chat ID |
+| `YTHOOK_DIGEST_HOURS` | `3` | Default digest window |
 
 ---
 
@@ -235,37 +206,53 @@ const patterns = [
 
 ```
 YoutubeHook/
-├── SKILL.md                    ← This file — AI agent integration guide
-├── AGENTS.md                   ← Development documentation for agents
-├── README.md                   ← For humans (EN)
-├── README_ru.md                ← For humans (RU)
+├── SKILL.md                  ← This file — AI agent integration guide
+├── AGENTS.md                 ← Development docs
+├── README.md                 ← User-facing docs (EN)
+├── README_ru.md              ← User-facing docs (RU)
 │
-├── youtube-hook.user.js        ← Main userscript
-├── package.json                ← npm config (linting)
-├── .eslintrc.json              ← ESLint config
-├── bun.lock                    ← Bun lockfile
-└── .gitignore
+├── youtube-hook.user.js      ← Main userscript
+├── package.json              ← npm config (linting)
+├── .eslintrc.json            ← ESLint config
+├── bun.lock                  ← Bun lockfile
+├── .gitignore
+│
+└── backend/                  ← FastAPI backend + digest CLI
+    ├── README.md
+    ├── AGENTS.md
+    ├── Dockerfile
+    ├── docker-compose.yml
+    ├── requirements.txt
+    ├── .env.example
+    └── app/
+        ├── __init__.py
+        ├── __main__.py
+        ├── config.py
+        ├── database.py
+        ├── main.py            ← FastAPI webhook server
+        └── digest.py          ← Digest CLI generator
 ```
 
 ---
 
 ## 📊 Use with YouTube Digest Skill
 
-This script pairs with the `youtube-digest` skill to automatically generate daily summaries of watched YouTube content.
+The complete workflow for automated YouTube digests:
 
-**Workflow:**
-1. YoutubeHook sends video IDs to a webhook endpoint
-2. The webhook receiver stores them in a database
-3. The digest agent collects daily data and generates summaries
-4. Results are delivered to the user (e.g., via Telegram)
+1. **YoutubeHook userscript** sends video IDs to the backend's `/hook` endpoint
+2. **Backend** stores them in SQLite (clicks.db)
+3. **Digest CLI** (cron) generates periodic digests via YouTube Data API, filtering already-clicked videos
+4. **AI agent** formats the digest (raw JSON mode) or relays formatted HTML chunks
+5. **Telegram delivery** via bot API or agent's messaging platform
 
 ---
 
 ## ⚠️ Common Pitfalls
 
-- **Webhook URL must be set** — the script does nothing until configured via menu
+- **Webhook URL must be set** — userscript does nothing until configured via Tampermonkey menu
 - **Placeholders are URL-encoded** — `{title}` and `{url}` are encoded for GET safety
 - **Dedup is per-install** — clearing browser storage also clears sent history
-- **Tampermonkey required** — the script uses `GM_*` APIs not available in plain JS
-- **HTTPS only** — YouTube is HTTPS; make sure your webhook also supports HTTPS
-- **CORS not an issue** — `GM_xmlhttpRequest` bypasses CORS restrictions
+- **Tampermonkey required** — userscript uses `GM_*` APIs not available in plain JS
+- **Google OAuth required** for digest generation (youtube.readonly scope)
+- **First run requires `--refresh`** to populate channel cache
+- **Click tracking**: videos the user clicks via redirect links are filtered from future digests

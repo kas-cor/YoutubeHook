@@ -1,0 +1,24 @@
+services:
+  ythook-backend:
+    build: .
+    container_name: ythook-backend
+    restart: unless-stopped
+    ports:
+      - "${YTHOOK_PORT:-8800}:8800"
+    volumes:
+      - ythook-data:/data
+      - ${GOOGLE_TOKEN_PATH:-./google_token.json}:/data/google_token.json:ro
+    env_file:
+      - .env
+    environment:
+      - YTHOOK_DATA_DIR=/data
+      - YTHOOK_GOOGLE_CREDS=/data/google_token.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8800/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  ythook-data:
