@@ -25,6 +25,7 @@
         version: '0.2.0',
         storageKey: 'sent_video_ids',
         webhookUrlKey: 'webhook_url',
+        webhookTokenKey: 'webhook_token',
         videoIdLength: 11,
         requestTimeout: 10000,
         debounceDelay: 300
@@ -42,6 +43,8 @@
         _cache: null,
         getWebhookUrl: () => GM_getValue(CONFIG.webhookUrlKey, ''),
         setWebhookUrl: (url) => GM_setValue(CONFIG.webhookUrlKey, url),
+        getWebhookToken: () => GM_getValue(CONFIG.webhookTokenKey, ''),
+        setWebhookToken: (token) => GM_setValue(CONFIG.webhookTokenKey, token),
         _loadSentIds: () => {
             if (!settings._cache) {
                 const data = GM_getValue(CONFIG.storageKey, '[]');
@@ -116,13 +119,14 @@
         };
 
         // Replace placeholders with actual values
-        // Supported placeholders: {videoId}, {id}, {title}, {url}, {timestamp}
+        // Supported placeholders: {videoId}, {id}, {title}, {url}, {timestamp}, {token}
         let finalUrl = webhookUrl
             .replace(/{videoId}/g, encodeURIComponent(videoInfo.videoId))
             .replace(/{id}/g, encodeURIComponent(videoInfo.id))
             .replace(/{title}/g, encodeURIComponent(videoInfo.title))
             .replace(/{url}/g, encodeURIComponent(videoInfo.url))
-            .replace(/{timestamp}/g, encodeURIComponent(videoInfo.timestamp));
+            .replace(/{timestamp}/g, encodeURIComponent(videoInfo.timestamp))
+            .replace(/{token}/g, encodeURIComponent(settings.getWebhookToken()));
 
         logger.log(`Sending video ${videoId} to webhook: ${finalUrl}`);
 
@@ -183,7 +187,8 @@
 - {id} - video ID (URL encoded)
 - {title} - video title (URL encoded)
 - {url} - full YouTube URL (URL encoded)
-- {timestamp} - ISO timestamp (URL encoded)`;
+- {timestamp} - ISO timestamp (URL encoded)
+- {token} - webhook auth token (URL encoded)`;
             const message = currentUrl
                 ? `Enter webhook URL with placeholders:\n\n${placeholders}\n\nCurrent: ${currentUrl}`
                 : `Enter webhook URL with placeholders:\n\nExample: ${defaultTemplate}\n\n${placeholders}`;
@@ -196,6 +201,18 @@
                 }
                 settings.setWebhookUrl(trimmed);
                 alert('Webhook URL saved');
+            }
+        });
+
+        GM_registerMenuCommand('🔑 Set Webhook Token', () => {
+            const currentToken = settings.getWebhookToken();
+            const newToken = prompt(
+                `Enter webhook auth token. It will replace {token} in your webhook URL.\n\nCurrent: ${currentToken || '(not set)'}`,
+                currentToken
+            );
+            if (newToken !== null) {
+                settings.setWebhookToken(newToken.trim());
+                alert('Webhook token saved');
             }
         });
 

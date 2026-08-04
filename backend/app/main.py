@@ -65,12 +65,19 @@ async def webhook_receiver(
     ts: str = Query("", description="ISO timestamp"),
     channel: str = Query("", description="Channel name"),
     user_id: str = Query("yt-hook", description="User/source identifier"),
+    token: str = Query("", description="Webhook auth token"),
 ):
     """
     Receive video tracking data from YoutubeHook userscript (GET request).
 
     Supports both `?videoId=` and `?id=` parameter names for compatibility.
+
+    Authenticated with a shared token: when `WEBHOOK_TOKEN` is configured,
+    requests must supply it via `?token=` or they are rejected.
     """
+    if config.WEBHOOK_TOKEN and token != config.WEBHOOK_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing webhook token")
+
     vid = videoId or id
     if not vid:
         raise HTTPException(status_code=400, detail="Missing videoId parameter")

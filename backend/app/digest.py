@@ -68,22 +68,130 @@ def _parse_duration(iso: str) -> int:
     return h * 3600 + mins * 60 + s
 
 
+# ─── YouTube API Error Handling ─────────────────────────────────────────────
+
+_HTTPError = None
+try:
+    from googleapiclient.errors import HttpError as _HTTPError
+except Exception:  # pragma: no cover - optional dep
+    _HTTPError = None
+
+
+def _is_quota_error(exc) -> bool:
+    """Detect YouTube quota exceeded (HTTP 403, reason=quotaExceeded)."""
+    if _HTTPError is not None and isinstance(exc, _HTTPError):
+        try:
+            reason = exc.resp.get("reason", "")
+        except Exception:
+            reason = ""
+        status = getattr(exc, "resp", None)
+        status_code = getattr(status, "status", None) if status else None
+        return (
+            status_code == 403 or (getattr(exc, "status_code", None) == 403)
+        ) and "quota" in reason.lower()
+    return False
+
+
+def _is_rate_limit(exc) -> bool:
+    """Detect rate limiting (HTTP 429) and Retry-After quota exhaustion."""
+    if _HTTPError is not None and isinstance(exc, _HTTPError):
+        try:
+            reason = exc.resp.get("reason", "")
+            status = getattr(exc.resp, "status", None)
+        except Exception:
+            reason, status = "", None
+        reason_l = reason.lower()
+        return (
+            getattr(exc, "status_code", None) == 429
+            or status == 429
+            or (
+                status == 403
+                and "ratelimitexceeded" in reason_l
+            )
+        )
+    return False
+
+
+def _is_network_error(exc) -> bool:
+    """Detect transient network/transport failures (not HTTP errors)."""
+    return _HTTPError is None or not isinstance(exc, _HTTPError)
+
+
+def _api_call(fn, *args, retries=3, **kwargs):
+    """
+    Execute one YouTube API call with resilient error handling.
+
+    429 (rate limit)   → retry with exponential backoff (up to `retries`),
+                         then raise HTTPException 429.
+    403 (quota)        → hard fail: print to stderr and exit code 2.
+    network errors     → retry up to `retries` times, then raise the last error.
+
+    Raises the final exception when retries are exhausted (429/network), so
+    callers never silently swallow API failures.
+    """
+    attempt = 0
+    while True:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if _is_quota_error(e):
+                print(
+                    "ERROR: YouTube API quota exceeded (403). "
+                    "Wait for quota reset or check your API key.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if _is_rate_limit(e):
+                attempt += 1
+                if attempt > retries:
+                    print(
+                        f"ERROR: YouTube API rate limited after {retries} retries.",
+                        file=sys.stderr,
+                    )
+                    raise e
+                delay = min(2 ** attempt, 30)
+                print(
+                    f"  Rate limited, retrying in {delay}s "
+                    f"(attempt {attempt}/{retries})...",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                continue
+            if _is_network_error(e):
+                attempt += 1
+                if attempt > retries:
+                    print(
+                        f"ERROR: YouTube API network error after {retries} retries: {e}",
+                        file=sys.stderr,
+                    )
+                    raise e
+                delay = min(2 ** attempt, 10)
+                print(
+                    f"  Network error ({e}), retrying in {delay}s "
+                    f"(attempt {attempt}/{retries})...",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                continue
+            # Non-transient error (auth, bad request, ...): re-raise.
+            raise e
+
+
 def fetch_channel_videos(channel_id: str, info: dict, cutoff_ts: float) -> list[dict]:
     """Fetch recent videos for one channel via YouTube API."""
     uploads_id = info.get("uploads", "")
     if not uploads_id:
         return []
 
-    try:
-        yt = _get_yt()
-        resp = yt.playlistItems().list(
+    yt = _get_yt()
+    resp = _api_call(
+        lambda: yt.playlistItems().list(
             part="snippet",
             playlistId=uploads_id,
             maxResults=15,
-        ).execute()
-    except Exception as e:
-        print(f"  API error for {info.get('title', channel_id)}: {e}", file=sys.stderr)
-        return []
+        ).execute(),
+        retries=3,
+    )
 
     items = resp.get("items", [])
     if not items:
@@ -91,14 +199,16 @@ def fetch_channel_videos(channel_id: str, info: dict, cutoff_ts: float) -> list[
 
     vid_ids = [it["snippet"]["resourceId"]["videoId"] for it in items]
     durations = {}
-    try:
-        for i in range(0, len(vid_ids), 50):
-            batch = vid_ids[i : i + 50]
-            vresp = yt.videos().list(part="contentDetails", id=",".join(batch)).execute()
-            for v in vresp.get("items", []):
-                durations[v["id"]] = v["contentDetails"]["duration"]
-    except Exception:
-        pass
+    for i in range(0, len(vid_ids), 50):
+        batch = vid_ids[i : i + 50]
+        vresp = _api_call(
+            lambda: yt.videos().list(
+                part="contentDetails", id=",".join(batch)
+            ).execute(),
+            retries=3,
+        )
+        for v in vresp.get("items", []):
+            durations[v["id"]] = v["contentDetails"]["duration"]
 
     fresh = []
     for item in items:
@@ -130,8 +240,11 @@ def fetch_channel_videos(channel_id: str, info: dict, cutoff_ts: float) -> list[
                 "published_ts": pub_ts,
                 "description": desc,
             })
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                f"  Skipping item for {info.get('title', channel_id)}: {e}",
+                file=sys.stderr,
+            )
 
     return fresh
 

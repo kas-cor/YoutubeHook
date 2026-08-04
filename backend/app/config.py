@@ -34,6 +34,7 @@ MAX_WORKERS = 20
 
 HOST = os.environ.get("YTHOOK_HOST", "0.0.0.0")
 PORT = int(os.environ.get("YTHOOK_PORT", "8800"))
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "")
 
 # ─── Google OAuth ────────────────────────────────────────────────────────────
 
